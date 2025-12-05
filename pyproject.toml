@@ -1,0 +1,10 @@
+[project]
+name = "2521"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "jax>=0.4.30",
+    "polyscope>=2.5.0",
+]
