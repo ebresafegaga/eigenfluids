@@ -10,7 +10,8 @@ class EigenFluid():
     # Dynamic components produced at each time step
     basis_coef: Float64[Array, "N"] # Velocity/Vorticity basis coefficients
     force_coef: Float64[Array, "N"] # Projected external force coefficients (f_k)
-    # velocity_field: Float64
+    # density: Float64[Array, "Gx Gy Gz"] # Velocity field
+    # velocity: Float64[Array, "Gx Gy Gz 3"] # Density field
 
     # Statically known or precomputed
     dt: Float64  # The fixed time step used for integration
@@ -19,9 +20,11 @@ class EigenFluid():
     N: Int64  # Basis Dimension
     Ck:  Float64[Array, "N N N"] # Structure coefficients
     eigenvalues: Float64[Array, "N"]  # Eigenvalues for viscosity and ordering modes
-    # velocity_basis_fields: Float64[Array, "N G G G Vec3"]
+    # velocity_basis_fields: Float64[Array, "N Gx Gy Gz 3"]
 
-# Time integration
+# 1) Precomputation 
+
+# 2) Time integration
 def step(e: EigenFluid) -> EigenFluid:
     """
     Integrates the basis coefficients (w) forward in time using an explicit Euler scheme 
@@ -91,3 +94,5 @@ def step(e: EigenFluid) -> EigenFluid:
         Ck=e.Ck,
         eigenvalues=e.eigenvalues,
     )
+
+# 3) Advection 
