@@ -11,6 +11,91 @@ import jax
 # 3. precomputation of the velocity basis field 
 # 4. precomputation of the matrix Ck using those things
 
+def sample_trilinear_cellcenter(U, pos):
+    """
+    U: (mx,my,mz,3) or (mx,my,mz) sampled at cell centers in [0,pi]^3
+    pos: (...,3) in [0,pi]^3
+    returns: (...,3) or (...) sampled by trilinear interpolation
+    """
+    mx, my, mz = U.shape[0], U.shape[1], U.shape[2]
+    L = jnp.pi
+
+    # map x in [0,L] -> grid coordinate g in [ -0.5, mx-0.5 ]
+    gx = (pos[..., 0] / L) * mx - 0.5
+    gy = (pos[..., 1] / L) * my - 0.5
+    gz = (pos[..., 2] / L) * mz - 0.5
+
+    i0 = jnp.floor(gx).astype(jnp.int32)
+    j0 = jnp.floor(gy).astype(jnp.int32)
+    k0 = jnp.floor(gz).astype(jnp.int32)
+
+    tx = gx - i0
+    ty = gy - j0
+    tz = gz - k0
+
+    # clamp to valid cell-center range
+    i0 = jnp.clip(i0, 0, mx - 2)
+    j0 = jnp.clip(j0, 0, my - 2)
+    k0 = jnp.clip(k0, 0, mz - 2)
+
+    i1 = i0 + 1
+    j1 = j0 + 1
+    k1 = k0 + 1
+
+    def at(ii, jj, kk):
+        return U[ii, jj, kk]
+
+    c000 = at(i0, j0, k0)
+    c100 = at(i1, j0, k0)
+    c010 = at(i0, j1, k0)
+    c110 = at(i1, j1, k0)
+    c001 = at(i0, j0, k1)
+    c101 = at(i1, j0, k1)
+    c011 = at(i0, j1, k1)
+    c111 = at(i1, j1, k1)
+
+    c00 = c000 * (1 - tx)[..., None] + c100 * tx[..., None] if c000.ndim == pos.ndim else c000*(1-tx)+c100*tx
+    c10 = c010 * (1 - tx)[..., None] + c110 * tx[..., None] if c010.ndim == pos.ndim else c010*(1-tx)+c110*tx
+    c01 = c001 * (1 - tx)[..., None] + c101 * tx[..., None] if c001.ndim == pos.ndim else c001*(1-tx)+c101*tx
+    c11 = c011 * (1 - tx)[..., None] + c111 * tx[..., None] if c011.ndim == pos.ndim else c011*(1-tx)+c111*tx
+
+    c0 = c00 * (1 - ty)[..., None] + c10 * ty[..., None] if c00.ndim == pos.ndim else c00*(1-ty)+c10*ty
+    c1 = c01 * (1 - ty)[..., None] + c11 * ty[..., None] if c01.ndim == pos.ndim else c01*(1-ty)+c11*ty
+
+    out = c0 * (1 - tz)[..., None] + c1 * tz[..., None] if c0.ndim == pos.ndim else c0*(1-tz)+c1*tz
+    return out
+
+def advect_particles(particles, U, dt):
+    # particles: (P,3)
+    v1 = sample_trilinear_cellcenter(U, particles)                 # (P,3)
+    mid = particles + 0.5 * dt * v1
+    v2 = sample_trilinear_cellcenter(U, mid)
+    newp = particles + dt * v2
+
+    # keep in domain [0, pi]^3 (simple clamp)
+    L = jnp.pi
+    newp = jnp.clip(newp, 0.0, L)
+    return newp
+
+def advect_density(density, U, dt):
+    mx, my, mz = density.shape
+    L = jnp.pi
+
+    xs = (jnp.arange(mx) + 0.5) * (L / mx)
+    ys = (jnp.arange(my) + 0.5) * (L / my)
+    zs = (jnp.arange(mz) + 0.5) * (L / mz)
+    X, Y, Z = jnp.meshgrid(xs, ys, zs, indexing="ij")
+    pos = jnp.stack([X, Y, Z], axis=-1)  # (mx,my,mz,3)
+
+    v = sample_trilinear_cellcenter(U, pos)              # (mx,my,mz,3)
+    back = pos - dt * v
+    back = jnp.clip(back, 0.0, L)
+
+    # sample old density at backtraced points
+    rho_new = sample_trilinear_cellcenter(density, back) # (mx,my,mz)
+    return rho_new
+
+
 class EigenFluid():
     """Fluid Simulation using Laplacial Eigenfunctions"""
     # Dynamic components
@@ -32,6 +117,11 @@ class EigenFluid():
 
     velocity_basis_fields: Float64[Array, "N mx my mz 3"]  # Φ_k velocity basis
     Ck: Float64[Array, "N N N"] # Structure coefficients
+
+
+    # Rengering 
+    density: Float64[Array, "mx my mz"]                 # smoke density grid
+    particles: Float64[Array, "P 3"]                    # particle positions in [0, pi]^3
 
     # Precomputation 
 
@@ -229,7 +319,7 @@ class EigenFluid():
         advances the simulation.
         """
         
-        w = self.basis_coef = jnp.zeros((self.N,), dtype=jnp.float32) 
+        w = self.basis_coef
         N = self.N
         
         # Store kinetic energy of the velocity field
@@ -264,3 +354,7 @@ class EigenFluid():
 
         # Reconstruct velocity field
         self.velocity_field = self.expand_basis()
+
+        # Rendering 
+        self.density = advect_density(self.density, self.velocity_field, self.dt)
+        self.particles = advect_particles(self.particles, self.velocity_field, self.dt)
