@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "2521"
+name = "eigenfluids-3d"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

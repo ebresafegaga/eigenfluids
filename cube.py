@@ -149,6 +149,7 @@ def visualize_gas_simulation():
     sim_state = {
         'running': False,
         'step_count': 0,
+        'show_particles': True,
         'add_force': False,
         'force_strength': 0.1
     }

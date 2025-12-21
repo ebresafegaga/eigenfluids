@@ -1,7 +1,7 @@
 [project]
-name = "2521"
+name = "eigenfluids-3d"
 version = "0.1.0"
-description = "Add your description here"
+description = "A 3D Implementation of Fluid Simulation Using Laplacian Eigenfunctions in JAX"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
