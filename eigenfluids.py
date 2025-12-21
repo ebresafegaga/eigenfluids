@@ -1,15 +1,16 @@
 """Fluid Simulation using Laplacian Eigenfunctions"""
 
-from dataclasses import dataclass
 from typing import List, Optional
 from jaxtyping import Array, Float64, Int32, Int64
 from jax import numpy as jnp, vmap
 import jax
 
+# approach to implementation
 # 1. precomputation of the wave number for the 3D domain (k1, k2, k3) 
 # 2. precomputation of the eigenvalues (lambda_k) 
 # 3. precomputation of the velocity basis field 
 # 4. precomputation of the matrix Ck using those things
+# 5. implement the time step (should be easy)
 
 def sample_trilinear_cellcenter(U, pos):
     """
@@ -65,12 +66,17 @@ def sample_trilinear_cellcenter(U, pos):
     out = c0 * (1 - tz)[..., None] + c1 * tz[..., None] if c0.ndim == pos.ndim else c0*(1-tz)+c1*tz
     return out
 
-def advect_particles(particles, U, dt):
+def advect_particles(particles, U, dt, key=None, diffusion=0.01):
     # particles: (P,3)
     v1 = sample_trilinear_cellcenter(U, particles)                 # (P,3)
     mid = particles + 0.5 * dt * v1
     v2 = sample_trilinear_cellcenter(U, mid)
     newp = particles + dt * v2
+
+    # Add random diffusion to prevent clustering along streamlines
+    if key is not None:
+        noise = jax.random.normal(key, particles.shape) * diffusion
+        newp = newp + noise
 
     # keep in domain [0, pi]^3 (simple clamp)
     L = jnp.pi
@@ -104,24 +110,25 @@ class EigenFluid():
     velocity_field: Float64[Array, "mx my mz 3"] # Current velocity field
 
     # Static (or precomputed) components
-    mx: Int32 # Velocity box size
-    my: Int32
+    mx: Int32 # the domain, this particular 
+    my: Int32 # instance of eigenfluids is for a 3D box of pi * pi * pi
     mz: Int32 
-    dt: Float64  # The fixed time step used for integration
-    viscosity: Float64 # The viscosity parameter of the fluid
-    domain_geometry: Array # The dimension
-    N: Int64  # Basis Dimension
+    dt: Float64  # TTime step
+    viscosity: Float64 # The viscosityof the fluid
+    N: Int64  # The basis size (number of eigenfunctions 
+              # -- more is better but requires more precomputation time )
    
     vector_wave_numbers: Int32[Array, "N 4"] 
     eigenvalues: Float64[Array, "N"]  # Eigenvalues for viscosity and ordering modes
 
-    velocity_basis_fields: Float64[Array, "N mx my mz 3"]  # Φ_k velocity basis
+    velocity_basis_fields: Float64[Array, "N mx my mz 3"]  # velocity basis fields
     Ck: Float64[Array, "N N N"] # Structure coefficients
 
 
-    # Rengering 
+    # Rendering stuff
     density: Float64[Array, "mx my mz"]                 # smoke density grid
     particles: Float64[Array, "P 3"]                    # particle positions in [0, pi]^3
+    particle_rng_key: Array                             # random key for particle diffusion
 
     # Precomputation 
 
@@ -144,7 +151,6 @@ class EigenFluid():
             axis=1,
         )
 
-        # Sort by |k|^2 = k1^2 + k2^2 + k3^2
         lam_mag: Int64[Array, "K"] = (
             k_triples[:, 0].astype(jnp.int64) ** 2
             + k_triples[:, 1].astype(jnp.int64) ** 2
@@ -153,26 +159,38 @@ class EigenFluid():
         order: Int32[Array, "K"] = jnp.argsort(lam_mag).astype(jnp.int32)
         k_triples = k_triples[order]
 
-        # Expand each k-triple into three forms i=1,2,3
         k_rep: Int32[Array, "N 3"] = jnp.repeat(k_triples, 3, axis=0)
         i_rep: Int32[Array, "N 1"] = jnp.tile(jnp.arange(1, 4, dtype=jnp.int32), K)[:, None]
 
         self.vector_wave_numbers: Int32[Array, "N 4"] = jnp.concatenate([k_rep, i_rep], axis=1)
 
+    # 2. 
+    # This function is dependent on calling precompute_wave_numbers first
+    def precompute_eigenvalues(self):
+        k = self.vector_wave_numbers
+        lam_mag: Int64[Array, "N"] = (
+            k[:, 0].astype(jnp.int64) ** 2
+            + k[:, 1].astype(jnp.int64) ** 2
+            + k[:, 2].astype(jnp.int64) ** 2
+        )
+        result = lam_mag.astype(jnp.float64)
+
+        self.eigenvalues = result
+
     # 3D box from the thesis:
     # DE WITT, T. 2010. Fluid Simulation in Bases of Laplacian Eigenfunctions. 
     # M.S. thesis, University of Toronto, Toronto, ON, Canada.
     @staticmethod
-    def analytic_velocity_basis(
-        k_mode: Int32[Array, "4"],          # (k1,k2,k3,i) with i ∈ {1,2,3}
-        x: Float64[Array, ""],
-        y: Float64[Array, ""],
-        z: Float64[Array, ""],
+    def closed_form_velocity_basis(
+        wave_numbers: Int32[Array, "4"],
+        x: Float64,
+        y: Float64,
+        z: Float64,
     ) -> Float64[Array, "3"]:
-        k1 = k_mode[0].astype(jnp.float64)
-        k2 = k_mode[1].astype(jnp.float64)
-        k3 = k_mode[2].astype(jnp.float64)
-        i  = k_mode[3].astype(jnp.int32)    # 1..3
+        k1 = wave_numbers[0].astype(jnp.float64)
+        k2 = wave_numbers[1].astype(jnp.float64)
+        k3 = wave_numbers[2].astype(jnp.float64)
+        i  = wave_numbers[3]
 
         lam = k1**2 + k2**2 + k3**2
         inv_lam = 1.0 / lam
@@ -215,7 +233,7 @@ class EigenFluid():
 
         # Evaluate one mode on the whole grid (vectorize over grid points)
         eval_on_grid = jnp.vectorize(
-            lambda km, x, y, z: EigenFluid.analytic_velocity_basis(km, x, y, z),
+            lambda km, x, y, z: EigenFluid.closed_form_velocity_basis(km, x, y, z),
             signature="(4),(),(),()->(3)",
         )
 
@@ -224,9 +242,16 @@ class EigenFluid():
 
         self.velocity_basis_fields = result
 
+    # used to calculate the curl of a velocity field to get the vorticity field
+    # based on the curl operator defined in "Fluid Simulation for Computer Graphics" by Richard Bridson
     @staticmethod
-    def curl_3d(U: Float64[Array, "mx my mz 3"], dx: float, dy: float, dz: float) -> Float64[Array, "mx my mz 3"]:
-        ux, uy, uz = U[..., 0], U[..., 1], U[..., 2]
+    def curl(
+        veclocity_field: Float64[Array, "mx my mz 3"], 
+        dx: float, 
+        dy: float, 
+        dz: float
+    ) -> Float64[Array, "mx my mz 3"]:
+        ux, uy, uz = veclocity_field[..., 0], veclocity_field[..., 1], veclocity_field[..., 2]
 
         duz_dy = jnp.gradient(uz, dy, axis=1)
         duy_dz = jnp.gradient(uy, dz, axis=2)
@@ -237,76 +262,47 @@ class EigenFluid():
         duy_dx = jnp.gradient(uy, dx, axis=0)
         dux_dy = jnp.gradient(ux, dy, axis=1)
 
-        wx = duz_dy - duy_dz
-        wy = dux_dz - duz_dx
-        wz = duy_dx - dux_dy
+        wx = duz_dy - duy_dz # pyright: ignore[reportOperatorIssue]
+        wy = dux_dz - duz_dx # pyright: ignore[reportOperatorIssue]
+        wz = duy_dx - dux_dy # pyright: ignore[reportOperatorIssue]
         
         return jnp.stack([wx, wy, wz], axis=-1)
 
+    # The thesis doesn't provide an closed form solution for Ck, so we do it the numerical way
+    # Based on Algorithm 2 from the paper
     def precompute_Ck(self):
-        Phi = self.velocity_basis_fields                      # (N,mx,my,mz,3)
+        Phi = self.velocity_basis_fields
         N = int(self.N)
         mx, my, mz = int(self.mx), int(self.my), int(self.mz)
 
-        # grid spacing for [0, π]^3 sampled at cell centers
         dx = jnp.pi / mx
         dy = jnp.pi / my
         dz = jnp.pi / mz
 
-        # Compute vorticity basis numerically: curl(Phi_k)
-        # Curl each mode: vmap over N
-        Phi_curl = jax.vmap(lambda U: EigenFluid.curl_3d(U, dx, dy, dz), in_axes=0)(Phi)  # (N,mx,my,mz,3)
+        # Compute vorticity basis numerically: curl(Phi)
+        vorticity_basis_fields = jax.vmap(lambda U: EigenFluid.curl(U, dx, dy, dz), in_axes=0)(self.velocity_basis_fields)
 
         # Flatten spatial dims -> M points
-        Phi_f      = Phi.reshape(N, -1, 3)       # (N,M,3)
-        Phi_curl_f = Phi_curl.reshape(N, -1, 3)  # (N,M,3)
-        lam = self.eigenvalues                   # (N,)
-
-        # Optional integration weight (approx ∫ ≈ sum * dV)
-        dV = dx * dy * dz
-
-        # Allocate output
-        Ck = jnp.zeros((N, N, N), dtype=Phi.dtype)
+        Phi_f = Phi.reshape(N, -1, 3)       # (N,M,3)
+        Phi_curl_f = vorticity_basis_fields.reshape(N, -1, 3)  # (N,M,3)
 
         def body(j, Ck_acc):
-            # cross(Phi_i, Phi_j) for all i, all points -> (N,M,3)
-            cross_ij = jnp.cross(Phi_f, Phi_f[j][None, :, :])   # broadcast over i
+            cross_ij = jnp.cross(Phi_curl_f[j][None, :, :], Phi_f[j]) 
 
-            # project onto all k using dot with curl(Phi_k):
-            # out[k,i] = sum_m cross_ij[i,m,:] · Phi_curl_f[k,m,:]
-            # einsum: (i m c, k m c) -> (k i)
             proj_ki = jnp.einsum("imc,kmc->ki", cross_ij, Phi_curl_f)
+            slice_kij = (self.eigenvalues[j]) * proj_ki
 
-            # scale by λ_j and volume element
-            slice_kij = (lam[j] * dV) * proj_ki   # (k,i)
-
-            # write into Ck[:, :, j]
             Ck_acc = Ck_acc.at[:, :, j].set(slice_kij)
             return Ck_acc
 
+        Ck = jnp.zeros((N, N, N), dtype=Phi.dtype)
         Ck = jax.lax.fori_loop(0, N, body, Ck)
 
+        # Make the matix sparse based on a threshold
         def threshold_zero(Ck: Float64[Array, "N N N"], eps: float = 1e-6) -> Float64[Array, "N N N"]:
             return jnp.where(jnp.abs(Ck) > eps, Ck, 0.0)
 
-        self.Ck = threshold_zero(Ck, eps=1e-6)
-
-
-    # 2. 
-    def precompute_eigenvalues(self):
-        """
-        Laplacian eigenvalues for our domain:
-            λ_k = (k1^2 + k2^2 + k3^2)
-        """
-        k = self.vector_wave_numbers
-        lam_mag: Int64[Array, "N"] = (
-            k[:, 0].astype(jnp.int64) ** 2
-            + k[:, 1].astype(jnp.int64) ** 2
-            + k[:, 2].astype(jnp.int64) ** 2
-        )
-        result = lam_mag.astype(jnp.float64)
-
-        self.eigenvalues = result
+        self.Ck = Ck # threshold_zero(Ck)
 
 
     def expand_basis(self) -> Float64[Array, "x y z 3"]:
@@ -326,7 +322,7 @@ class EigenFluid():
         e1 = jnp.sum(w**2)
         
         # Matrix vector product
-        # Transpose of `w` happens using this `subscript` argument
+        # Transpose of `w` happens using the `subscript` argument
         w_dot = jnp.einsum('i, kij, j -> k', w, self.Ck, w)
 
         # Explicit Euler integration
@@ -336,8 +332,9 @@ class EigenFluid():
         e2 = jnp.sum(w_adv**2) 
         
         # Renormalize energy
+        # From Java implementation https://www.dgp.toronto.edu/~tyler/fluids/
         w_renorm = jnp.where(
-            e2 > 1e-5,  # From Java implementation
+            e2 > 1e-5, 
             w_adv * jnp.sqrt(e1 / e2), 
             w_adv
         )
@@ -350,11 +347,17 @@ class EigenFluid():
         w_final = w_viscous + self.force_coef
 
         self.basis_coef = w_final 
+        # From the Java impl
+        # I'm not sure why we need to set the force to zero...
         self.force_coef = jnp.zeros_like(self.force_coef)
 
         # Reconstruct velocity field
         self.velocity_field = self.expand_basis()
 
-        # Rendering 
+        # Rendering
         self.density = advect_density(self.density, self.velocity_field, self.dt)
-        self.particles = advect_particles(self.particles, self.velocity_field, self.dt)
+
+        # Update particles with diffusion
+        self.particle_rng_key, subkey = jax.random.split(self.particle_rng_key)
+        self.particles = advect_particles(self.particles, self.velocity_field, self.dt,
+                                         key=subkey, diffusion=0.008)

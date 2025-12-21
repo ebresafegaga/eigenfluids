@@ -66,7 +66,7 @@ def register_transparent_box():
     box_network = ps.register_curve_network("box_boundary", vertices, edges)
     box_network.set_color([0.8, 0.8, 0.8])  # Light gray
     box_network.set_radius(0.01, relative=False)  # Thin lines
-    
+
     # Also create transparent faces for the box
     # Define the 6 faces of the box (as triangles)
     faces = np.array([
@@ -83,15 +83,38 @@ def register_transparent_box():
         # Right (x=π)
         [1, 5, 6], [1, 6, 2]
     ])
-    
+
     # Register transparent surface mesh
     box_surface = ps.register_surface_mesh("box_surface", vertices, faces)
     box_surface.set_transparency(0.1)  # Very transparent
     box_surface.set_color([0.9, 0.9, 1.0])  # Slight blue tint
     box_surface.set_smooth_shade(True)
     box_surface.set_edge_width(0.0)  # No edges on surface
-    
+
     return box_network, box_surface
+
+
+def attract_particles_to_point(particles, attraction_point=None, strength=0.2):
+    """
+    Attract particles towards a specific point by shrinking and offsetting.
+    Similar to the Java attract_particles() method.
+
+    Args:
+        particles: (P, 3) array of particle positions
+        attraction_point: (3,) point to attract to, default is lower-left area
+        strength: how much to shrink (0.2 means shrink to 20% of size)
+    """
+    if attraction_point is None:
+        # Default: attract to lower-left region like the Java code
+        attraction_point = jnp.array([np.pi * 0.3, np.pi * 0.3, np.pi * 0.5])
+
+    # Shrink particles towards origin, then offset to attraction point
+    particles_attracted = particles * strength + attraction_point
+
+    # Keep in domain
+    particles_attracted = jnp.clip(particles_attracted, 0.0, jnp.pi)
+
+    return particles_attracted
 
 
 def visualize_smoke_simulation():
@@ -99,16 +122,16 @@ def visualize_smoke_simulation():
     Main visualization function for smoke simulation.
     """
     # --- Configuration ---
-    N_MODES_CUBED = 24  # 3 * 2^3
+    N_MODES_CUBED = 24 # 24, 81, 192, 375
     RES = 16            # Grid resolution
     
     # Initialize simulation
     print("Initializing simulation...")
     sim = EigenFluid()
     sim.N = N_MODES_CUBED
-    sim.mx = sim.my = sim.mz = RES 
+    sim.mx = sim.my = sim.mz = RES
     sim.dt = 0.01
-    sim.viscosity = 0.01  # Lower viscosity for more movement
+    sim.viscosity = 0.005
     
     # --- Precomputations ---
     print("Precomputing basis and structure coefficients...")
@@ -119,56 +142,94 @@ def visualize_smoke_simulation():
     print("Precomputation complete.")
     
     # --- State Initialization ---
-    # Initialize with some energy
+    # Initialize with more energy for dynamic smoke movement
     key = jax.random.PRNGKey(42)
-    sim.basis_coef = jax.random.normal(key, (sim.N,)) * 0.2
+    sim.basis_coef = jax.random.normal(key, (sim.N,)) * 0.4  # More initial energy
     sim.force_coef = jnp.zeros((sim.N,))
+
+    # Initialize particle RNG key
+    key, particle_key = jax.random.split(key)
+    sim.particle_rng_key = particle_key
     
     # Initialize velocity field
     sim.velocity_field = sim.expand_basis()
     
-    # Initialize Density - multiple smoke puffs
+    # Initialize Density - multiple thick smoke regions
     x = np.linspace(0, np.pi, RES)
     X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
-    
-    # Create multiple smoke sources
+
+    # Create multiple smoke sources with smooth falloff
     density = np.zeros((RES, RES, RES))
-    
-    # Central smoke ball
+
+    # Large central smoke ball with gradual falloff
     dist1 = np.sqrt((X-np.pi/2)**2 + (Y-np.pi/2)**2 + (Z-np.pi/2)**2)
-    density += np.where(dist1 < 0.5, 1.0, 0.0)
-    
-    # Corner smoke puff
-    dist2 = np.sqrt((X-np.pi/4)**2 + (Y-np.pi/4)**2 + (Z-3*np.pi/4)**2)
-    density += np.where(dist2 < 0.3, 0.8, 0.0)
-    
+    density += np.exp(-dist1**2 / 0.3)  # Smoother, larger smoke cloud
+
+    # Bottom-left smoke region
+    dist2 = np.sqrt((X-np.pi/4)**2 + (Y-np.pi/4)**2 + (Z-np.pi/4)**2)
+    density += np.exp(-dist2**2 / 0.2) * 0.9
+
+    # Top-right smoke region
+    dist3 = np.sqrt((X-3*np.pi/4)**2 + (Y-3*np.pi/4)**2 + (Z-3*np.pi/4)**2)
+    density += np.exp(-dist3**2 / 0.25) * 0.85
+
+    # Mid-level smoke layer (horizontal band)
+    dist4 = np.abs(Z - np.pi/2)
+    density += np.exp(-dist4**2 / 0.15) * 0.5
+
     # Normalize
     density = np.clip(density, 0, 1)
     sim.density = jnp.array(density)
     
     # Initialize Particles (optional, for additional visualization)
-    num_particles = 5000
-    sim.particles = jax.random.uniform(key, (num_particles, 3)) * np.pi
-    
+    # Sample more particles concentrated in high-density regions for better smoke visualization
+    num_particles = 200000  # Much more particles for thick smoke
+
+    # Sample particles weighted by density for more realistic smoke
+    density_flat = density.flatten()
+    density_prob = density_flat / (density_flat.sum() + 1e-10)
+
+    # Sample grid cell indices weighted by density
+    num_cells = RES * RES * RES
+    particle_key, key = jax.random.split(key)
+    cell_indices = jax.random.choice(particle_key, num_cells, shape=(num_particles,), p=density_prob)
+
+    # Convert cell indices to 3D positions with random offsets within cells
+    iz = cell_indices // (RES * RES)
+    iy = (cell_indices % (RES * RES)) // RES
+    ix = cell_indices % RES
+
+    # Add random offsets within each cell
+    offset_key, key = jax.random.split(key)
+    offsets = jax.random.uniform(offset_key, (num_particles, 3)) * (np.pi / RES)
+
+    particle_positions = jnp.stack([
+        (ix + 0.5) * (np.pi / RES),
+        (iy + 0.5) * (np.pi / RES),
+        (iz + 0.5) * (np.pi / RES)
+    ], axis=-1) + offsets
+
+    sim.particles = particle_positions
+
     # --- Polyscope Setup ---
     ps.init()
     ps.set_ground_plane_mode("none")
     ps.set_up_dir("z_up")
     ps.set_background_color([0.1, 0.1, 0.15])  # Dark background for better smoke visibility
-    
+
     # Register box boundaries
     print("Creating box boundaries...")
     box_wireframe, box_surface = register_transparent_box()
-    
+
     # Register initial smoke density
     print("Registering smoke volume...")
     vol_grid = register_smoke_volume(sim)
-    
-    # Optional: Register particles
+
+    # Optional: Register particles with thick smoke appearance
     particle_cloud = ps.register_point_cloud("particles", np.array(sim.particles))
-    particle_cloud.set_radius(0.003, relative=False)
-    particle_cloud.set_color([0.8, 0.8, 0.2])
-    particle_cloud.set_enabled(False)  # Start with particles disabled
+    particle_cloud.set_radius(0.004, relative=False)  # Larger particles for thick smoke
+    particle_cloud.set_color([0.85, 0.85, 0.9])  # Bright light gray/white for dense smoke
+    particle_cloud.set_enabled(True)  # Start with particles enabled
     
     # Simulation state
     sim_state = {
@@ -199,7 +260,12 @@ def visualize_smoke_simulation():
             sim.density = jnp.array(np.where(dist < 0.5, 1.0, 0.0))
             vol_grid.add_scalar_quantity("density", np.array(sim.density),
                                         enabled=True, vminmax=(0.0, 1.0), cmap='viridis')
-        
+
+        if psim.Button("Attract Particles"):
+            # Bunch up particles to watch them advect
+            sim.particles = attract_particles_to_point(sim.particles, strength=0.2)
+            particle_cloud.update_point_positions(np.array(sim.particles))
+
         # Display controls
         changed, sim_state['show_particles'] = psim.Checkbox("Show Particles", 
                                                              sim_state['show_particles'])
@@ -239,12 +305,6 @@ def visualize_smoke_simulation():
     
     # Set callback and show
     ps.set_user_callback(callback)
-    
-    print("\nControls:")
-    print("- Use GUI to start/stop simulation")
-    print("- Toggle particle visualization")
-    print("- Add random forces to create turbulence")
-    print("- Mouse to rotate view")
     
     ps.show()
 
