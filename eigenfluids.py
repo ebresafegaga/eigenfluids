@@ -5,105 +5,15 @@ from jaxtyping import Array, Float64, Int32, Int64
 from jax import numpy as jnp, vmap
 import jax
 
-# approach to implementation
+# plan
 # 1. precomputation of the wave number for the 3D domain (k1, k2, k3) 
 # 2. precomputation of the eigenvalues (lambda_k) 
 # 3. precomputation of the velocity basis field 
 # 4. precomputation of the matrix Ck using those things
-# 5. implement the time step (should be easy)
-
-def sample_trilinear_cellcenter(U, pos):
-    """
-    U: (mx,my,mz,3) or (mx,my,mz) sampled at cell centers in [0,pi]^3
-    pos: (...,3) in [0,pi]^3
-    returns: (...,3) or (...) sampled by trilinear interpolation
-    """
-    mx, my, mz = U.shape[0], U.shape[1], U.shape[2]
-    L = jnp.pi
-
-    # map x in [0,L] -> grid coordinate g in [ -0.5, mx-0.5 ]
-    gx = (pos[..., 0] / L) * mx - 0.5
-    gy = (pos[..., 1] / L) * my - 0.5
-    gz = (pos[..., 2] / L) * mz - 0.5
-
-    i0 = jnp.floor(gx).astype(jnp.int32)
-    j0 = jnp.floor(gy).astype(jnp.int32)
-    k0 = jnp.floor(gz).astype(jnp.int32)
-
-    tx = gx - i0
-    ty = gy - j0
-    tz = gz - k0
-
-    # clamp to valid cell-center range
-    i0 = jnp.clip(i0, 0, mx - 2)
-    j0 = jnp.clip(j0, 0, my - 2)
-    k0 = jnp.clip(k0, 0, mz - 2)
-
-    i1 = i0 + 1
-    j1 = j0 + 1
-    k1 = k0 + 1
-
-    def at(ii, jj, kk):
-        return U[ii, jj, kk]
-
-    c000 = at(i0, j0, k0)
-    c100 = at(i1, j0, k0)
-    c010 = at(i0, j1, k0)
-    c110 = at(i1, j1, k0)
-    c001 = at(i0, j0, k1)
-    c101 = at(i1, j0, k1)
-    c011 = at(i0, j1, k1)
-    c111 = at(i1, j1, k1)
-
-    c00 = c000 * (1 - tx)[..., None] + c100 * tx[..., None] if c000.ndim == pos.ndim else c000*(1-tx)+c100*tx
-    c10 = c010 * (1 - tx)[..., None] + c110 * tx[..., None] if c010.ndim == pos.ndim else c010*(1-tx)+c110*tx
-    c01 = c001 * (1 - tx)[..., None] + c101 * tx[..., None] if c001.ndim == pos.ndim else c001*(1-tx)+c101*tx
-    c11 = c011 * (1 - tx)[..., None] + c111 * tx[..., None] if c011.ndim == pos.ndim else c011*(1-tx)+c111*tx
-
-    c0 = c00 * (1 - ty)[..., None] + c10 * ty[..., None] if c00.ndim == pos.ndim else c00*(1-ty)+c10*ty
-    c1 = c01 * (1 - ty)[..., None] + c11 * ty[..., None] if c01.ndim == pos.ndim else c01*(1-ty)+c11*ty
-
-    out = c0 * (1 - tz)[..., None] + c1 * tz[..., None] if c0.ndim == pos.ndim else c0*(1-tz)+c1*tz
-    return out
-
-def advect_particles(particles, U, dt, key=None, diffusion=0.01):
-    # particles: (P,3)
-    v1 = sample_trilinear_cellcenter(U, particles)                 # (P,3)
-    mid = particles + 0.5 * dt * v1
-    v2 = sample_trilinear_cellcenter(U, mid)
-    newp = particles + dt * v2
-
-    # Add random diffusion to prevent clustering along streamlines
-    if key is not None:
-        noise = jax.random.normal(key, particles.shape) * diffusion
-        newp = newp + noise
-
-    # keep in domain [0, pi]^3 (simple clamp)
-    L = jnp.pi
-    newp = jnp.clip(newp, 0.0, L)
-    return newp
-
-def advect_density(density, U, dt):
-    mx, my, mz = density.shape
-    L = jnp.pi
-
-    xs = (jnp.arange(mx) + 0.5) * (L / mx)
-    ys = (jnp.arange(my) + 0.5) * (L / my)
-    zs = (jnp.arange(mz) + 0.5) * (L / mz)
-    X, Y, Z = jnp.meshgrid(xs, ys, zs, indexing="ij")
-    pos = jnp.stack([X, Y, Z], axis=-1)  # (mx,my,mz,3)
-
-    v = sample_trilinear_cellcenter(U, pos)              # (mx,my,mz,3)
-    back = pos - dt * v
-    back = jnp.clip(back, 0.0, L)
-
-    # sample old density at backtraced points
-    rho_new = sample_trilinear_cellcenter(density, back) # (mx,my,mz)
-    return rho_new
-
+# 5. implement the time integration
+# 6. Advectingg quantities accross the grid
 
 class EigenFluid():
-    """Fluid Simulation using Laplacial Eigenfunctions"""
     # Dynamic components
     basis_coef: Float64[Array, "N"] # Velocity/Vorticity basis coefficients
     force_coef: Float64[Array, "N"] # Projected external force coefficients (f_k)
@@ -116,7 +26,7 @@ class EigenFluid():
     dt: Float64  # TTime step
     viscosity: Float64 # The viscosityof the fluid
     N: Int64  # The basis size (number of eigenfunctions 
-              # -- more is better but requires more precomputation time )
+              # -- more is better but requires more precomputation time? )
    
     vector_wave_numbers: Int32[Array, "N 4"] 
     eigenvalues: Float64[Array, "N"]  # Eigenvalues for viscosity and ordering modes
@@ -126,22 +36,22 @@ class EigenFluid():
 
 
     # Rendering stuff
-    density: Float64[Array, "mx my mz"]                 # smoke density grid
-    particles: Float64[Array, "P 3"]                    # particle positions in [0, pi]^3
-    particle_rng_key: Array                             # random key for particle diffusion
+    density: Float64[Array, "mx my mz"] 
+    particles: Float64[Array, "P 3"]
+    particle_rng_key: Array
 
     # Precomputation 
 
     # 1)
     def precompute_wave_numbers(self) -> None:
         N = int(self.N)
-        if N % 3 != 0:
-            raise ValueError(f"3D basis expects N divisible by 3; got N={N}")
+        # if N % 3 != 0:
+        #     raise ValueError(f"3D basis expects N divisible by 3; got N={N}")
 
         K = N // 3  # number of unique k-triples
         m = int(round(K ** (1.0 / 3.0)))
-        if m**3 != K:
-            raise ValueError(f"Expected N = 3*m^3. Got N={N}, so K=N/3={K} is not a perfect cube.")
+        # if m**3 != K:
+        #     raise ValueError(f"Expected N = 3*m^3. Got N={N}, so K=N/3={K} is not a perfect cube.")
 
         ks: Int32[Array, "m"] = jnp.arange(1, m + 1, dtype=jnp.int32)
         k1, k2, k3 = jnp.meshgrid(ks, ks, ks, indexing="ij")
@@ -151,12 +61,12 @@ class EigenFluid():
             axis=1,
         )
 
-        lam_mag: Int64[Array, "K"] = (
-            k_triples[:, 0].astype(jnp.int64) ** 2
-            + k_triples[:, 1].astype(jnp.int64) ** 2
-            + k_triples[:, 2].astype(jnp.int64) ** 2
+        lam_mag = (
+            k_triples[:, 0] ** 2
+            + k_triples[:, 1] ** 2
+            + k_triples[:, 2] ** 2
         )
-        order: Int32[Array, "K"] = jnp.argsort(lam_mag).astype(jnp.int32)
+        order: Int32[Array, "K"] = jnp.argsort(lam_mag)
         k_triples = k_triples[order]
 
         k_rep: Int32[Array, "N 3"] = jnp.repeat(k_triples, 3, axis=0)
@@ -168,11 +78,7 @@ class EigenFluid():
     # This function is dependent on calling precompute_wave_numbers first
     def precompute_eigenvalues(self):
         k = self.vector_wave_numbers
-        lam_mag: Int64[Array, "N"] = (
-            k[:, 0].astype(jnp.int64) ** 2
-            + k[:, 1].astype(jnp.int64) ** 2
-            + k[:, 2].astype(jnp.int64) ** 2
-        )
+        lam_mag = (k[:, 0] ** 2 + k[:, 1] ** 2 + k[:, 2] ** 2)
         result = lam_mag.astype(jnp.float64)
 
         self.eigenvalues = result
@@ -199,21 +105,18 @@ class EigenFluid():
         s2, c2 = jnp.sin(k2 * y), jnp.cos(k2 * y)
         s3, c3 = jnp.sin(k3 * z), jnp.cos(k3 * z)
 
-        # Φ_{k,1}
         v1 = jnp.stack([
             inv_lam * (k2**2 + k3**2) * c1 * s2 * s3,
             inv_lam * (-k1 * k2)      * s1 * c2 * s3,
             inv_lam * (-k1 * k3)      * s1 * s2 * c3,
         ])
 
-        # Φ_{k,2}
         v2 = jnp.stack([
             inv_lam * (k2 * k1)        * c1 * s2 * s3,
             inv_lam * (-(k1**2+k3**2)) * s1 * c2 * s3,
             inv_lam * (k2 * k3)        * s1 * s2 * c3,
         ])
 
-        # Φ_{k,3}
         v3 = jnp.stack([
             inv_lam * (-(k3 * k1))     * c1 * s2 * s3,
             inv_lam * (-(k3 * k2))     * s1 * c2 * s3,
@@ -225,20 +128,18 @@ class EigenFluid():
     def precompute_velocity_basis_fields(self):
         mx, my, mz  = self.mx, self.my, self.mz
 
-        # Assuming a pi * pi * pi domain?
+        # Assuming a pi * pi * pi
         xs = (jnp.arange(mx, dtype=jnp.float64) + 0.5) * (jnp.pi / mx)
         ys = (jnp.arange(my, dtype=jnp.float64) + 0.5) * (jnp.pi / my)
         zs = (jnp.arange(mz, dtype=jnp.float64) + 0.5) * (jnp.pi / mz)
-        X, Y, Z = jnp.meshgrid(xs, ys, zs, indexing="ij")  # (mx,my,mz)
+        X, Y, Z = jnp.meshgrid(xs, ys, zs, indexing="ij") 
 
-        # Evaluate one mode on the whole grid (vectorize over grid points)
-        eval_on_grid = jnp.vectorize(
-            lambda km, x, y, z: EigenFluid.closed_form_velocity_basis(km, x, y, z),
+        # process each N at once
+        vectorized_closed_form_velocity_basis = jnp.vectorize(
+            EigenFluid.closed_form_velocity_basis,
             signature="(4),(),(),()->(3)",
         )
-
-        # vmap over modes
-        result = jax.vmap(lambda km: eval_on_grid(km, X, Y, Z), in_axes=0)(self.vector_wave_numbers).astype(jnp.float64)
+        result = jax.vmap(lambda km: vectorized_closed_form_velocity_basis(km, X, Y, Z), in_axes=0)(self.vector_wave_numbers)
 
         self.velocity_basis_fields = result
 
@@ -282,9 +183,8 @@ class EigenFluid():
         # Compute vorticity basis numerically: curl(Phi)
         vorticity_basis_fields = jax.vmap(lambda U: EigenFluid.curl(U, dx, dy, dz), in_axes=0)(self.velocity_basis_fields)
 
-        # Flatten spatial dims -> M points
-        Phi_f = Phi.reshape(N, -1, 3)       # (N,M,3)
-        Phi_curl_f = vorticity_basis_fields.reshape(N, -1, 3)  # (N,M,3)
+        Phi_f = Phi.reshape(N, -1, 3)
+        Phi_curl_f = vorticity_basis_fields.reshape(N, -1, 3)
 
         def body(j, Ck_acc):
             cross_ij = jnp.cross(Phi_curl_f[j][None, :, :], Phi_f[j]) 
@@ -299,10 +199,10 @@ class EigenFluid():
         Ck = jax.lax.fori_loop(0, N, body, Ck)
 
         # Make the matix sparse based on a threshold
-        def threshold_zero(Ck: Float64[Array, "N N N"], eps: float = 1e-6) -> Float64[Array, "N N N"]:
+        def make_sparse(Ck: Float64[Array, "N N N"], eps: float = 1e-6) -> Float64[Array, "N N N"]:
             return jnp.where(jnp.abs(Ck) > eps, Ck, 0.0)
 
-        self.Ck = Ck # threshold_zero(Ck)
+        self.Ck = Ck # make_sparse(Ck)
 
 
     def expand_basis(self) -> Float64[Array, "x y z 3"]:
@@ -354,10 +254,93 @@ class EigenFluid():
         # Reconstruct velocity field
         self.velocity_field = self.expand_basis()
 
-        # Rendering
         self.density = advect_density(self.density, self.velocity_field, self.dt)
 
-        # Update particles with diffusion
+        # try some diffusion
         self.particle_rng_key, subkey = jax.random.split(self.particle_rng_key)
-        self.particles = advect_particles(self.particles, self.velocity_field, self.dt,
-                                         key=subkey, diffusion=0.008)
+        self.particles = advect_particles(
+            self.particles, 
+            self.velocity_field, 
+            self.dt,
+            key=subkey, 
+            diffusion=0.008)
+        
+# to sample points from the velocity field
+def sample_trilinear_cellcenter(U, pos):
+    mx, my, mz = U.shape[0], U.shape[1], U.shape[2]
+    L = jnp.pi
+
+    gx = (pos[..., 0] / L) * mx - 0.5
+    gy = (pos[..., 1] / L) * my - 0.5
+    gz = (pos[..., 2] / L) * mz - 0.5
+
+    i0 = jnp.floor(gx).astype(jnp.int32)
+    j0 = jnp.floor(gy).astype(jnp.int32)
+    k0 = jnp.floor(gz).astype(jnp.int32)
+
+    tx = gx - i0
+    ty = gy - j0
+    tz = gz - k0
+    
+    i0 = jnp.clip(i0, 0, mx - 2)
+    j0 = jnp.clip(j0, 0, my - 2)
+    k0 = jnp.clip(k0, 0, mz - 2)
+
+    i1 = i0 + 1
+    j1 = j0 + 1
+    k1 = k0 + 1
+
+    def at(ii, jj, kk):
+        return U[ii, jj, kk]
+
+    c000 = at(i0, j0, k0)
+    c100 = at(i1, j0, k0)
+    c010 = at(i0, j1, k0)
+    c110 = at(i1, j1, k0)
+    c001 = at(i0, j0, k1)
+    c101 = at(i1, j0, k1)
+    c011 = at(i0, j1, k1)
+    c111 = at(i1, j1, k1)
+
+    c00 = c000 * (1 - tx)[..., None] + c100 * tx[..., None] if c000.ndim == pos.ndim else c000*(1-tx)+c100*tx
+    c10 = c010 * (1 - tx)[..., None] + c110 * tx[..., None] if c010.ndim == pos.ndim else c010*(1-tx)+c110*tx
+    c01 = c001 * (1 - tx)[..., None] + c101 * tx[..., None] if c001.ndim == pos.ndim else c001*(1-tx)+c101*tx
+    c11 = c011 * (1 - tx)[..., None] + c111 * tx[..., None] if c011.ndim == pos.ndim else c011*(1-tx)+c111*tx
+
+    c0 = c00 * (1 - ty)[..., None] + c10 * ty[..., None] if c00.ndim == pos.ndim else c00*(1-ty)+c10*ty
+    c1 = c01 * (1 - ty)[..., None] + c11 * ty[..., None] if c01.ndim == pos.ndim else c01*(1-ty)+c11*ty
+
+    out = c0 * (1 - tz)[..., None] + c1 * tz[..., None] if c0.ndim == pos.ndim else c0*(1-tz)+c1*tz
+    return out
+
+def advect_particles(particles, U, dt, key=None, diffusion=0.01):
+    v1 = sample_trilinear_cellcenter(U, particles)
+    mid = particles + 0.5 * dt * v1
+    v2 = sample_trilinear_cellcenter(U, mid)
+    newp = particles + dt * v2
+
+    # Add some noise
+    if key is not None:
+        noise = jax.random.normal(key, particles.shape) * diffusion
+        newp = newp + noise
+
+    L = jnp.pi
+    newp = jnp.clip(newp, 0.0, L)
+    return newp
+
+def advect_density(density, U, dt):
+    mx, my, mz = density.shape
+    L = jnp.pi
+
+    xs = (jnp.arange(mx) + 0.5) * (L / mx)
+    ys = (jnp.arange(my) + 0.5) * (L / my)
+    zs = (jnp.arange(mz) + 0.5) * (L / mz)
+    X, Y, Z = jnp.meshgrid(xs, ys, zs, indexing="ij")
+    pos = jnp.stack([X, Y, Z], axis=-1)
+
+    v = sample_trilinear_cellcenter(U, pos)
+    back = pos - dt * v
+    back = jnp.clip(back, 0.0, L)
+
+    rho_new = sample_trilinear_cellcenter(density, back)
+    return rho_new
