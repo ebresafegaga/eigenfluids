@@ -1,4 +1,7 @@
-# A 3D Implementation of Fluid Simulation Using Laplacian Eigenfunctions in JAX
+# 3D Fluid Simulation Using Laplacian Eigenfunctions in JAX
+
+## Info
+Paper: https://www.dgp.toronto.edu/~tyler/fluids/
 
 ## Setup
 ```sh
