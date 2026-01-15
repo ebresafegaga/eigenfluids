@@ -1,4 +1,4 @@
-# 3D Fluid Dynamics Using Laplacian Eigenfunctions in JAX
+# 3D Fluid Dynamics (in JAX) Using Laplacian Eigenfunctions
 
 ## Info
 Paper: https://www.dgp.toronto.edu/~tyler/fluids/
