@@ -1,11 +1,22 @@
-uv venv -p /opt/homebrew/bin/python3.11
-source .venv/bin/activate
+# A 3D Implementation of Fluid Simulation Using Laplacian Eigenfunctions in JAX
 
-# Install dependencies
-uv pip install -e .[dev]
+## Setup
+```sh
+$ uv venv -p /opt/homebrew/bin/python3.11
+$ source .venv/bin/activate
+```
 
-# Run the first scene
-uv run cube.py
+## Install dependencies
+```sh
+$ uv pip install -e .[dev]
+```
 
-# Run the second scene
+## Run the first scene
+```sh
+$ uv run cube.py
+```
+
+## Run the second scene
+```sh
 uv run cuboid.py
+```
