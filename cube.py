@@ -6,13 +6,11 @@ import jax
 from eigenfluids import EigenFluid
 
 def create_box():
-    # vertices
     vertices = np.array([
         [0, 0, 0], [np.pi, 0, 0], [np.pi, np.pi, 0], [0, np.pi, 0],  # bottom
         [0, 0, np.pi], [np.pi, 0, np.pi], [np.pi, np.pi, np.pi], [0, np.pi, np.pi]  # top
     ])
     
-    # edges
     edges = np.array([
         # Bottom face
         [0, 1], [1, 2], [2, 3], [3, 0],
@@ -25,7 +23,6 @@ def create_box():
     return vertices, edges
 
 def register_gas_volume(sim, name="smoke_density"):
-    # Get density field as numpy array
     density = np.array(sim.density)
     mx, my, mz = density.shape
     
@@ -45,8 +42,8 @@ def register_transparent_box():
     vertices, edges = create_box()
     
     box_network = ps.register_curve_network("box_boundary", vertices, edges)
-    box_network.set_color([0.8, 0.8, 0.8])  # Light gray
-    box_network.set_radius(0.01, relative=False)  # Thin lines
+    box_network.set_color([0.8, 0.8, 0.8])
+    box_network.set_radius(0.01, relative=False) 
 
     faces = np.array([
         [0, 1, 2], [0, 2, 3],
@@ -57,7 +54,6 @@ def register_transparent_box():
         [1, 5, 6], [1, 6, 2]
     ])
 
-    # Register transparent surface mesh
     box_surface = ps.register_surface_mesh("box_surface", vertices, faces)
     box_surface.set_transparency(0.1)
     box_surface.set_color([0.9, 0.9, 1.0]) 
@@ -67,8 +63,8 @@ def register_transparent_box():
     return box_network, box_surface
 
 def visualize_gas_simulation():
-    #
-    N_BASIS_DOMAIN = 192 # 24, 81, 192, 375
+    # TODO: can also make this a command like argument
+    N_BASIS_DOMAIN = 192 # can be 24, 81, 192, 375
     RES = 16
     
     sim = EigenFluid()
@@ -107,7 +103,7 @@ def visualize_gas_simulation():
 
     sim.density = jnp.array(density)
     
-    num_particles = 200000  # Much more particles for thick smoke
+    num_particles = 200000 
 
     density_flat = density.flatten()
     density_prob = density_flat / (density_flat.sum() + 1e-10)
@@ -140,11 +136,10 @@ def visualize_gas_simulation():
     register_transparent_box()
     vol_grid = register_gas_volume(sim)
 
-    # Optional: Register particles with thick smoke appearance
     particle_cloud = ps.register_point_cloud("particles", np.array(sim.particles))
-    particle_cloud.set_radius(0.005, relative=False)  # Larger particles for thick smoke
-    particle_cloud.set_color([0.85, 0.85, 0.9])  # Bright light gray/white for dense smoke
-    particle_cloud.set_enabled(True)  # Start with particles enabled
+    particle_cloud.set_radius(0.005, relative=False) 
+    particle_cloud.set_color([0.85, 0.85, 0.9]) 
+    particle_cloud.set_enabled(True)
     
     sim_state = {
         'running': False,

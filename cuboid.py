@@ -6,13 +6,11 @@ import jax
 from eigenfluids_cuboid import EigenFluidCuboid
 
 def create_box_cuboid(Lx, Ly, Lz):
-    # vertices for cuboid Lx × Ly × Lz
     vertices = np.array([
         [0, 0, 0], [Lx, 0, 0], [Lx, Ly, 0], [0, Ly, 0],  # bottom
         [0, 0, Lz], [Lx, 0, Lz], [Lx, Ly, Lz], [0, Ly, Lz]  # top
     ])
     
-    # edges
     edges = np.array([
         # Bottom face
         [0, 1], [1, 2], [2, 3], [3, 0],
@@ -25,7 +23,6 @@ def create_box_cuboid(Lx, Ly, Lz):
     return vertices, edges
 
 def register_gas_volume(sim, name="smoke_density"):
-    # Get density field as numpy array
     density = np.array(sim.density)
     mx, my, mz = density.shape
 
@@ -45,8 +42,8 @@ def register_transparent_box(Lx, Ly, Lz):
     vertices, edges = create_box_cuboid(Lx, Ly, Lz)
     
     box_network = ps.register_curve_network("box_boundary", vertices, edges)
-    box_network.set_color([0.8, 0.8, 0.8])  # Light gray
-    box_network.set_radius(0.01, relative=False)  # Thin lines
+    box_network.set_color([0.8, 0.8, 0.8]) 
+    box_network.set_radius(0.01, relative=False) 
 
     faces = np.array([
         [0, 1, 2], [0, 2, 3],
@@ -100,20 +97,19 @@ def visualize_gas_simulation():
     
     sim.velocity_field = sim.expand_basis()
 
-    # Grid for tall box
     x = np.linspace(0, Lx, RES)
     y = np.linspace(0, Ly, RES)
     z = np.linspace(0, Lz, RES)
     X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
 
     density = np.zeros((RES, RES, RES))
-    # Center smoke in the middle of the tall box
+    # put it in the middle
     dist1 = np.sqrt((X-Lx/2)**2 + (Y-Ly/2)**2 + (Z-Lz/2)**2)
     density += np.exp(-dist1**2 / 0.3)
 
     sim.density = jnp.array(density)
     
-    num_particles = 200000  # Much more particles for thick smoke
+    num_particles = 200000 
 
     density_flat = density.flatten()
     density_prob = density_flat / (density_flat.sum() + 1e-10)
@@ -150,11 +146,10 @@ def visualize_gas_simulation():
     register_transparent_box(Lx, Ly, Lz)
     vol_grid = register_gas_volume(sim)
 
-    # Optional: Register particles with thick smoke appearance
     particle_cloud = ps.register_point_cloud("particles", np.array(sim.particles))
-    particle_cloud.set_radius(0.005, relative=False)  # Larger particles for thick smoke
-    particle_cloud.set_color([0.85, 0.85, 0.9])  # Bright light gray/white for dense smoke
-    particle_cloud.set_enabled(True)  # Start with particles enabled
+    particle_cloud.set_radius(0.005, relative=False)
+    particle_cloud.set_color([0.85, 0.85, 0.9]) 
+    particle_cloud.set_enabled(True)
     
     sim_state = {
         'running': False,
